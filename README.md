@@ -1,314 +1,43 @@
-<?php
-declare(strict_types=1);
+# Ticket Sales
 
-namespace App;
+Aplikacja PHP (SSR - server side redner) do przeglądania sprzedaży biletów z pliku CSV.
 
-final class CsvReader
-{
-    private const REQUIRED_COLUMNS = [
-        "event_id",
-        "event_date",
-        "city",
-        "category",
-        "order_id",
-        "ticket_qty",
-        "status",
-        "utm_source",
-        "utm_campaign",
-        "utm_content",
-        "sold_out",
-    ];
+## Wymagania
 
-    private const SEPARATORS = [",", ";", "\t", "|"];
-    private const TRUE_VALUES = ["true", "1", "tak", "yes", "y", "t"];
-    private const FALSE_VALUES = ["false", "0", "nie", "no", "n", "f"];
+- PHP 8.1 lub nowszy
 
-    private ?array $dialect = null;
+## Uruchomienie
+bash / terminal
+``` 
+gh repo clone KrzysztofRozbicki/Konwersatorium_Muzyczne_Rekrutacja
+cd Konwersatorium_Muzyczne_Rekrutacja
+php -S localhost:8000 -t public
+```
 
-    public function __construct(private readonly string $filePath)
-    {
-        if (!is_readable($this->filePath)) {
-            throw new \RuntimeException(
-                "Nie można odczytać pliku CSV: {$this->filePath}",
-            );
-        }
-    }
+Otwórz w przeglądarce <http://localhost:8000>.
 
-    public function read(): \Generator
-    {
-        $dialect = $this->detectDialect();
+## Dane
 
-        $handle = fopen($this->filePath, "r");
-        if ($handle === false) {
-            throw new \RuntimeException(
-                "Nie udało się otworzyć pliku: {$this->filePath}",
-            );
-        }
+Domyślny plik z przykładowymi danymi: `data/tickets.csv`.
 
-        try {
-            $headerLine = fgets($handle);
-            if ($headerLine === false) {
-                return;
-            }
+Aby wgrać własny CSV, użyj formularza w sekcji "Źródło danych" na stronie głównej.
+Po wgraniu zobaczysz podgląd — kliknij "Aktywuj", żeby użyć pliku jako źródła.
+Można przetestować po testowych mockupach wgranych w folder `data/test-data/`
 
-            while (($line = fgets($handle)) !== false) {
-                $line = $this->stripBom($line);
-                $decoded = $this->decodeLine($line, $dialect["encoding"]);
-                $row = $this->parseLine(
-                    $decoded,
-                    $dialect["separator"],
-                    $dialect["enclosure"],
-                );
+Wymagane kolumny: `event_id`, `event_date`, `city`, `category`, `order_id`,
+`ticket_qty`, `status`, `utm_source`, `utm_campaign`, `utm_content`, `sold_out`.
 
-                if (count($row) === 0) {
-                    continue;
-                }
+W przypadku błędu struktury pliku CSV pojawi się komunikat z informacją o problemie.
+Limit rozmiaru: 10 MB.
 
-                $normalized = $this->normalizeRow($row, $dialect["column_map"]);
-                if ($normalized !== null) {
-                    yield $normalized;
-                }
-            }
-        } finally {
-            fclose($handle);
-        }
-    }
+## Funkcjonalność
 
-    public function validate(): array
-    {
-        $dialect = $this->detectDialect();
+- Lista wydarzeń z sumą sprzedanych biletów (tylko `status = confirmed`)
+- Top 10 kampanii UTM po liczbie sprzedanych biletów
+- Filtrowanie po mieście, kategorii i zakresie dat
+- Auto-detekcja separatora (`,` `;` `tab` `|`), kodowania (UTF-8 / Windows-1250)
+  i formatów dat, aby akceptowało różne pliki csv
 
-        $foundColumns = array_filter($dialect["column_map"]);
-        $missing = array_diff(self::REQUIRED_COLUMNS, $foundColumns);
-        if (!empty($missing)) {
-            throw new \RuntimeException(
-                "W pliku brakuje wymaganych kolumn: " .
-                    implode(", ", $missing) .
-                    ". Wykryte kolumny: " .
-                    implode(", ", array_unique($foundColumns)),
-            );
-        }
+## Czas realizacji
 
-        $count = 0;
-        foreach ($this->read() as $_) {
-            $count++;
-        }
-
-        if ($count === 0) {
-            throw new \RuntimeException(
-                "Plik CSV nie zawiera żadnych poprawnych rekordów.",
-            );
-        }
-
-        return [
-            "rows" => $count,
-            "columns" => array_values(array_unique($foundColumns)),
-        ];
-    }
-
-    private function detectDialect(): array
-    {
-        if ($this->dialect !== null) {
-            return $this->dialect;
-        }
-
-        $handle = fopen($this->filePath, "r");
-        if ($handle === false) {
-            throw new \RuntimeException(
-                "Nie udało się otworzyć pliku: {$this->filePath}",
-            );
-        }
-        $sample = fread($handle, 8192) ?: "";
-        fclose($handle);
-
-        $sample = $this->stripBom($sample);
-        $encoding = $this->detectEncoding($sample);
-        $sample = $this->decodeLine($sample, $encoding);
-
-        $firstLine = strtok($sample, "\r\n") ?: "";
-        $enclosure = $this->detectEnclosure($firstLine);
-        $separator = $this->detectSeparator($firstLine, $enclosure);
-
-        $headers = $this->parseLine($firstLine, $separator, $enclosure);
-        $columnMap = $this->mapColumns($headers);
-
-        $this->dialect = [
-            "separator" => $separator,
-            "enclosure" => $enclosure,
-            "encoding" => $encoding,
-            "column_map" => $columnMap,
-        ];
-
-        return $this->dialect;
-    }
-
-    private function detectEncoding(string $sample): string
-    {
-        if (mb_check_encoding($sample, "UTF-8")) {
-            return "UTF-8";
-        }
-        foreach (["Windows-1250", "ISO-8859-2"] as $enc) {
-            $converted = @iconv($enc, "UTF-8", $sample);
-            if (
-                $converted !== false &&
-                mb_check_encoding($converted, "UTF-8")
-            ) {
-                return $enc;
-            }
-        }
-        return "UTF-8";
-    }
-
-    private function detectSeparator(string $line, string $enclosure): string
-    {
-        $best = ",";
-        $bestCount = 0;
-
-        foreach (self::SEPARATORS as $sep) {
-            $count = $this->countOutsideQuotes($line, $sep, $enclosure);
-            if ($count > $bestCount) {
-                $bestCount = $count;
-                $best = $sep;
-            }
-        }
-        return $best;
-    }
-
-    private function detectEnclosure(string $line): string
-    {
-        $doubleQuotes = substr_count($line, '"');
-        $singleQuotes = substr_count($line, "'");
-
-        if ($singleQuotes >= 2 && $singleQuotes > $doubleQuotes) {
-            return "'";
-        }
-        return '"';
-    }
-
-    private function countOutsideQuotes(
-        string $line,
-        string $needle,
-        string $enclosure,
-    ): int {
-        $count = 0;
-        $inQuotes = false;
-        $len = strlen($line);
-        for ($i = 0; $i < $len; $i++) {
-            $ch = $line[$i];
-            if ($ch === $enclosure) {
-                $inQuotes = !$inQuotes;
-                continue;
-            }
-            if (!$inQuotes && $ch === $needle) {
-                $count++;
-            }
-        }
-        return $count;
-    }
-
-    private function mapColumns(array $headers): array
-    {
-        $map = [];
-        foreach ($headers as $idx => $header) {
-            $name = strtolower(trim($header));
-            $map[$idx] = in_array($name, self::REQUIRED_COLUMNS, true)
-                ? $name
-                : null;
-        }
-        return $map;
-    }
-
-    private function parseLine(
-        string $line,
-        string $separator,
-        string $enclosure,
-    ): array {
-        $line = rtrim($line, "\r\n");
-        if ($line === "") {
-            return [];
-        }
-        return str_getcsv($line, $separator, $enclosure);
-    }
-
-    private function normalizeRow(array $row, array $columnMap): ?array
-    {
-        $result = [];
-        foreach ($columnMap as $idx => $canonical) {
-            if ($canonical === null) {
-                continue;
-            }
-            $value = $row[$idx] ?? "";
-            $result[$canonical] = $this->normalizeValue($canonical, $value);
-        }
-
-        foreach (self::REQUIRED_COLUMNS as $col) {
-            if (
-                !array_key_exists($col, $result) ||
-                $result[$col] === null ||
-                $result[$col] === ""
-            ) {
-                return null;
-            }
-        }
-
-        return $result;
-    }
-
-    private function normalizeValue(
-        string $canonical,
-        string $value,
-    ): string|int|bool|null {
-        $value = trim($value);
-        if ($value === "") {
-            return null;
-        }
-
-        return match ($canonical) {
-            "event_date" => $this->normalizeDate($value),
-            "ticket_qty" => (int) $value,
-            "sold_out" => $this->normalizeBool($value),
-            default => $value,
-        };
-    }
-
-    private function normalizeDate(string $value): ?string
-    {
-        $formats = ["Y-m-d", "Y/m/d", "d.m.Y", "d-m-Y", "d/m/Y", "m/d/Y"];
-        foreach ($formats as $fmt) {
-            $d = \DateTime::createFromFormat($fmt, $value);
-            if ($d && $d->format($fmt) === $value) {
-                return $d->format("Y-m-d");
-            }
-        }
-        return null;
-    }
-
-    private function normalizeBool(string $value): ?bool
-    {
-        $v = strtolower($value);
-        if (in_array($v, self::TRUE_VALUES, true)) {
-            return true;
-        }
-        if (in_array($v, self::FALSE_VALUES, true)) {
-            return false;
-        }
-        return null;
-    }
-
-    private function stripBom(string $s): string
-    {
-        if (str_starts_with($s, "\xEF\xBB\xBF")) {
-            return substr($s, 3);
-        }
-        return $s;
-    }
-
-    private function decodeLine(string $line, string $encoding): string
-    {
-        if ($encoding === "UTF-8") {
-            return $line;
-        }
-        $converted = @iconv($encoding, "UTF-8//IGNORE", $line);
-        return $converted === false ? $line : $converted;
-    }
-}
+~5 godzin
