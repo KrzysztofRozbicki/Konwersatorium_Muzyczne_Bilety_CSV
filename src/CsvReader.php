@@ -227,7 +227,7 @@ final class CsvReader
         if ($line === "") {
             return [];
         }
-        return str_getcsv($line, $separator, $enclosure, "\\");
+        return str_getcsv($line, $separator, $enclosure);
     }
 
     private function normalizeRow(array $row, array $columnMap): ?array
