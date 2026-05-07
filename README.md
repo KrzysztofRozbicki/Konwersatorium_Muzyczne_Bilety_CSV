@@ -40,4 +40,4 @@ Limit rozmiaru: 10 MB.
 
 ## Czas realizacji
 
-~5 godzin
+~4 godziny
